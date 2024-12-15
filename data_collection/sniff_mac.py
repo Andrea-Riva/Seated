@@ -94,9 +94,17 @@ def save_scan_results(results):
     lines = results.splitlines()
     current_device = None
 
+    # Aggiungi l'elenco degli IP da escludere
+    exclude_ips = ["192.168.1.1", "192.168.1.184"]  # Escludi router e Raspberry Pi
+
     for line in lines:
         if line.startswith("Nmap scan report for"):
             ip = line.split(" ")[-1].strip('()')
+
+            # Controlla se l'IP è nell'elenco degli IP da escludere
+            if ip in exclude_ips:
+                continue  # Salta questo dispositivo
+
             current_device = {"ip": ip, "mac": None}
             devices.append(current_device)
         elif "MAC Address" in line and current_device is not None:
@@ -140,3 +148,5 @@ nmap_results = run_nmap(command)
 # Se ci sono risultati, salvali nel database
 if nmap_results:
     save_scan_results(nmap_results)
+else:
+    print("Nessun risultato da Nmap.")

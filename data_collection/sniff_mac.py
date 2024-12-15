@@ -1,6 +1,7 @@
 import sqlite3
 import subprocess
 from datetime import datetime
+import requests
 
 # Funzione per eseguire il comando NMAP
 def run_nmap(command):
@@ -15,6 +16,20 @@ def run_nmap(command):
         print(f"Si è verificato un errore: {e}")
         return None
 
+# Funzione per ottenere il nome del vendor tramite MAC address
+def get_device_vendor(mac_address):
+    url = f"https://api.macvendors.com/{mac_address}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            manufacturer = response.text.strip()  # Otteniamo solo il nome del produttore
+            return manufacturer
+        else:
+            return "null"
+    except requests.exceptions.RequestException as e:
+        print(f"Errore nell'ottenere i dati dal MAC address: {e}")
+        return "Errore"
+
 # Funzione per creare il database e la tabella dispositivi
 def create_database():
     conn = sqlite3.connect('devices.db')
@@ -25,7 +40,8 @@ def create_database():
         CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT UNIQUE,
-            mac TEXT
+            mac TEXT,
+            device_vendor TEXT
         )
     ''')
 
@@ -40,6 +56,23 @@ def create_database():
     conn.commit()
     conn.close()
 
+# Funzione per aggiungere la colonna device_vendor se non esiste
+def add_device_vendor_column():
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
+
+    try:
+        # Aggiungi la colonna 'device_vendor' se non esiste già
+        cursor.execute('''
+            ALTER TABLE devices ADD COLUMN device_vendor TEXT
+        ''')
+    except sqlite3.OperationalError:
+        # La colonna esiste già, quindi ignora l'errore
+        pass
+
+    conn.commit()
+    conn.close()
+
 # Funzione per inserire i dispositivi nel database
 def insert_devices(devices):
     conn = sqlite3.connect('devices.db')
@@ -47,10 +80,14 @@ def insert_devices(devices):
 
     for device in devices:
         try:
+            # Ottieni solo il nome del vendor tramite il MAC address
+            device_vendor = get_device_vendor(device['mac'])
+
+            # Inserisci o aggiorna il dispositivo nel database con il nome del vendor
             cursor.execute('''
-                INSERT OR REPLACE INTO devices (ip, mac)
-                VALUES (?, ?)
-            ''', (device['ip'], device['mac']))
+                INSERT OR REPLACE INTO devices (ip, mac, device_vendor)
+                VALUES (?, ?, ?)
+            ''', (device['ip'], device['mac'], device_vendor))
         except sqlite3.IntegrityError:
             print(f"Errore durante l'inserimento del dispositivo: {device['ip']}")
 
@@ -94,17 +131,9 @@ def save_scan_results(results):
     lines = results.splitlines()
     current_device = None
 
-    # Aggiungi l'elenco degli IP da escludere
-    exclude_ips = ["192.168.1.1", "192.168.1.184"]  # Escludi router e Raspberry Pi
-
     for line in lines:
         if line.startswith("Nmap scan report for"):
             ip = line.split(" ")[-1].strip('()')
-
-            # Controlla se l'IP è nell'elenco degli IP da escludere
-            if ip in exclude_ips:
-                continue  # Salta questo dispositivo
-
             current_device = {"ip": ip, "mac": None}
             devices.append(current_device)
         elif "MAC Address" in line and current_device is not None:
@@ -142,11 +171,12 @@ command = f"sudo nmap -sn {ip_range}"
 # Creare il database e le tabelle (solo la prima volta)
 create_database()
 
+# Aggiungi la colonna device_vendor se non esiste
+add_device_vendor_column()
+
 # Esegui il comando NMAP
 nmap_results = run_nmap(command)
 
 # Se ci sono risultati, salvali nel database
 if nmap_results:
     save_scan_results(nmap_results)
-else:
-    print("Nessun risultato da Nmap.")

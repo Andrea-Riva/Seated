@@ -1,21 +1,11 @@
+import sqlite3
 import subprocess
+from datetime import datetime
 
-# Definisci il range IP della rete (modifica se necessario)
-ip_range = "192.168.1.0/24"
-
-# Indirizzi IP da escludere (router e Raspberry Pi)
-exclude_ips = ["192.168.1.1", "192.168.1.184"]
-
-# Definisci il comando NMAP
-command = f"sudo nmap -sn {ip_range}"
-
-# Esegui il comando NMAP tramite subprocess
+# Funzione per eseguire il comando NMAP
 def run_nmap(command):
     try:
-        # Esegui il comando e cattura l'output
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
-
-        # Verifica se l'esecuzione è stata corretta
         if result.returncode == 0:
             return result.stdout
         else:
@@ -25,45 +15,128 @@ def run_nmap(command):
         print(f"Si è verificato un errore: {e}")
         return None
 
-# Funzione per salvare i risultati in un file con la struttura richiesta
-def save_results(results, filename="nmap_results.txt"):
-    # Conta i dispositivi connessi
-    devices = []
+# Funzione per creare il database e la tabella dispositivi
+def create_database():
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
 
-    # Estrai l'IP e il MAC address dai risultati NMAP
+    # Verifica se la tabella devices esiste, altrimenti la crea
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT UNIQUE,
+            mac TEXT
+        )
+    ''')
+
+    # Verifica se la tabella scans esiste, altrimenti la crea
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_datetime TEXT
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+# Funzione per inserire i dispositivi nel database
+def insert_devices(devices):
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
+
+    for device in devices:
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO devices (ip, mac)
+                VALUES (?, ?)
+            ''', (device['ip'], device['mac']))
+        except sqlite3.IntegrityError:
+            print(f"Errore durante l'inserimento del dispositivo: {device['ip']}")
+
+    conn.commit()
+    conn.close()
+
+# Funzione per registrare una nuova scansione
+def insert_scan(scan_datetime):
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        INSERT INTO scans (scan_datetime)
+        VALUES (?)
+    ''', (scan_datetime,))
+
+    conn.commit()
+    conn.close()
+
+# Funzione per ottenere la lista degli IP dai dispositivi rilevati
+def get_current_ips(devices):
+    return {device['ip'] for device in devices}
+
+# Funzione per eliminare i dispositivi che non sono più rilevati
+def delete_old_devices(current_ips):
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
+
+    # Elimina i dispositivi che non sono presenti nell'ultimo scan
+    cursor.execute('''
+        DELETE FROM devices
+        WHERE ip NOT IN ({})
+    '''.format(','.join('?' for _ in current_ips)), tuple(current_ips))
+
+    conn.commit()
+    conn.close()
+
+# Funzione per eseguire la scansione e salvare i risultati nel database
+def save_scan_results(results):
+    devices = []
     lines = results.splitlines()
     current_device = None
 
     for line in lines:
-        # Rileva l'IP del dispositivo (linea che inizia con "Nmap scan report for")
         if line.startswith("Nmap scan report for"):
-            # Estrai l'IP, rimuovendo eventuali parentesi
             ip = line.split(" ")[-1].strip('()')
-            if ip not in exclude_ips:  # Esclude router e Raspberry Pi
-                current_device = {"ip": ip, "mac": None}
-                devices.append(current_device)
-        # Rileva l'indirizzo MAC (linea che contiene "MAC Address")
+            current_device = {"ip": ip, "mac": None}
+            devices.append(current_device)
         elif "MAC Address" in line and current_device is not None:
             mac = line.split(" ")[2]
             current_device["mac"] = mac
 
-    # Rimuovi eventuali dispositivi con MAC None
+    # Rimuovi dispositivi senza MAC address
     devices = [device for device in devices if device["mac"] is not None]
 
-    # Salva i risultati nel file
-    with open(filename, "w") as file:
-        for device in devices:
-            file.write(f"{device['ip']}, {device['mac']}\n")
+    # Prendi gli IP correnti dei dispositivi
+    current_ips = get_current_ips(devices)
 
-        # Scrive il numero totale di dispositivi connessi, escludendo il router e il rasp pi zero 2w
-        num_devices = len(devices)
-        file.write(f"Numero totale di dispositivi connessi: {num_devices}\n")
+    # Aggiungi dispositivi al database
+    insert_devices(devices)
 
-    print(f"I risultati sono stati salvati in {filename}")
+    # Elimina i dispositivi non presenti nell'ultimo scan
+    delete_old_devices(current_ips)
 
-# Esegui la scansione e ottieni i risultati
+    # Registra la scansione
+    insert_scan(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    # Stampa il numero di dispositivi nel database
+    conn = sqlite3.connect('devices.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM devices')
+    count = cursor.fetchone()[0]
+    print(f"Numero totale di dispositivi connessi: {count}")
+    conn.close()
+
+# Comando NMAP da eseguire
+ip_range = "192.168.1.0/24"
+exclude_ips = ["192.168.1.1", "192.168.1.184"]  # Escludi router e Raspberry Pi
+command = f"sudo nmap -sn {ip_range}"
+
+# Creare il database e le tabelle (solo la prima volta)
+create_database()
+
+# Esegui il comando NMAP
 nmap_results = run_nmap(command)
 
-# Se ci sono risultati, salvali nel file
+# Se ci sono risultati, salvali nel database
 if nmap_results:
-    save_results(nmap_results)
+    save_scan_results(nmap_results)
